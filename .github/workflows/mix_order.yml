@@ -1,0 +1,109 @@
+---
+name: mix_order
+
+on:
+  push:
+  workflow_dispatch:
+
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  FORCE_COLOR: 1 # tox, pytest, ansible-lint
+  PY_COLORS: 1
+
+jobs:
+  build:
+    name: "py312"
+    environment: test
+    runs-on: "ubuntu-22.04"
+    # matrix:
+    #   config:
+    #     - name: "py312"
+    #       python_version: "3.12"
+    #       os: "ubuntu-22.04"
+    #       passed_name: "py312"
+      # max-parallel: 5
+      # The matrix testing goal is to cover the *most likely* environments
+      # which are expected to be used by users in production. Avoid adding a
+      # combination unless there are good reasons to test it, like having
+      # proof that we failed to catch a bug by not running it. Using
+      # distribution should be preferred instead of custom builds.
+    env:
+      # Number of expected test passes, safety measure for accidental skip of
+      # tests. Update value if you add/remove tests.
+      PYTEST_REQPASS: 869
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # needed by setuptools-scm
+          submodules: true
+
+      - name: Set pre-commit cache
+        uses: actions/cache@v4
+        if: ${{ matrix.passed_name == 'lint' }}
+        with:
+          path: |
+            ~/.cache/pre-commit
+          key: pre-commit-py312-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: Set ansible cache(s)
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/eco
+            examples/playbooks/collections/ansible_collections
+            ~/.cache/ansible-compat
+            ~/.ansible/collections
+            ~/.ansible/roles
+          key: py312-${{ hashFiles('tools/test-eco.sh', 'requirements.yml', 'examples/playbooks/collections/requirements.yml') }}
+
+      - name: Set up Python "3.12"
+        if: "!contains(matrix.shell, 'wsl')"
+        uses: actions/setup-python@v5
+        with:
+          cache: pip
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+          cache-dependency-path: test/schemas/package-lock.json
+
+      - name: Run ./tools/test-setup.sh
+        run: ./tools/test-setup.sh
+
+      - name: Install tox
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --upgrade "tox>=4.0.0"
+
+      - name: Log installed dists
+        run: python3 -m pip freeze --all
+
+      - name: Initialize tox envs mix_order
+        run: python3 -m tox --notest --skip-missing-interpreters false -vv -e "mix_order"
+        timeout-minutes: 5 # average is under 1, but macos can be over 3
+      
+      - name: Restore pytest-ranking cache
+        id: restore-pytest-ranking-cache
+        if: always()
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/.tox/mix_order/.pytest_cache/v/pytest_ranking_data
+          key: pytest-ranking-cache-${{ github.workflow }}-${{ runner.os }}-${{ matrix.python }}
+
+      # sequential run improves browsing experience (almost no speed impact)
+      - name: tox -e "mix_order"
+        run: python3 -m tox -e "mix_order"
+
+      - name: Save pytest-ranking cache
+        id: save-pytest-ranking-cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/.tox/mix_order/.pytest_cache/v/pytest_ranking_data
+          key: pytest-ranking-cache-${{ github.workflow }}-${{ runner.os }}-${{ matrix.python }}-${{ github.run_id }}
